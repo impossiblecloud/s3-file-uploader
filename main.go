@@ -3,15 +3,12 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"crypto/tls"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
-	"math/rand"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -20,6 +17,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/adidenko/s3-file-uploader/internal/cfg"
+	"github.com/adidenko/s3-file-uploader/internal/fs"
 	"github.com/adidenko/s3-file-uploader/internal/metrics"
 	"github.com/adidenko/s3-file-uploader/internal/utils"
 
@@ -36,54 +35,16 @@ const workersCannelSize = 1024
 const errorBadHTTPCode = "Bad HTTP status code"
 
 var applog *logger.Logger
-var workerStatuses []workerStatus
+var workerStatuses []cfg.WorkerStatus
 
 // Let's use the same buckets for histograms as NGINX Ingress controller
 var secondsDurationBuckets = []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10}
-
-// Config is the main app config struct
-type appConfig struct {
-	workers     int
-	verbose     bool
-	sendTimeout time.Duration
-	s3bucket    string
-
-	pushGateway  string
-	pushInterval time.Duration
-
-	metrics metrics.AppMetrics
-}
-
-// Client stores pointers to configured remote endpoint writes/clients
-type senderClient struct {
-	httpClient *http.Client
-
-	socketConn   net.Conn
-	socketWriter *bufio.Writer
-}
-
-// Message that is sent to workers
-type message struct {
-	file string
-}
-
-// Workers status
-type workerStatus struct {
-	ID      int  `json:"id"`
-	Running bool `json:"running"`
-}
-
-// Status defines status
-type appStatus struct {
-	Workers []workerStatus `json:"workers"`
-	Version string         `json:"version"`
-}
 
 // Status for future web endpoint
 func handleStatus(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 
-	myStatus := appStatus{
+	myStatus := cfg.AppStatus{
 		Workers: workerStatuses,
 		Version: version,
 	}
@@ -126,16 +87,16 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 // Prometheus metrics handler
-func handleMetrics(config appConfig) http.HandlerFunc {
+func handleMetrics(config cfg.AppConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		applog.V(8).Info("Got HTTP request for /metrics")
 
-		promhttp.HandlerFor(prometheus.Gatherer(config.metrics.Registry), promhttp.HandlerOpts{}).ServeHTTP(w, r)
+		promhttp.HandlerFor(prometheus.Gatherer(config.Metrics.Registry), promhttp.HandlerOpts{}).ServeHTTP(w, r)
 	}
 }
 
 // Main web server
-func runMainWebServer(config appConfig, listen string) {
+func runMainWebServer(config cfg.AppConfig, listen string) {
 	// Setup http router
 	router := mux.NewRouter().StrictSlash(true)
 
@@ -156,36 +117,36 @@ func runMainWebServer(config appConfig, listen string) {
 }
 
 // Init client
-func initClient(config appConfig) (senderClient, error) {
+func initClient(config cfg.AppConfig) (cfg.SenderClient, error) {
 	var err error
-	client := senderClient{}
+	client := cfg.SenderClient{}
 
 	tr := &http.Transport{
 		DisableKeepAlives: true,
 		TLSClientConfig:   &tls.Config{InsecureSkipVerify: true}}
-	client.httpClient = &http.Client{Transport: tr, Timeout: config.sendTimeout}
+	client.HttpClient = &http.Client{Transport: tr, Timeout: config.SendTimeout}
 
 	return client, err
 }
 
 // Close client
-func closeClient(config appConfig, client senderClient) error {
+func closeClient(config cfg.AppConfig, client cfg.SenderClient) error {
 	var err error
-	client.httpClient.CloseIdleConnections()
+	client.HttpClient.CloseIdleConnections()
 	return err
 }
 
 // Send file to s3 bucket
-func sendFile(config appConfig, client senderClient, file string) error {
-	applog.Infof("Sending %q file to %s", file, config.s3bucket)
+func sendFile(config cfg.AppConfig, client cfg.SenderClient, file string) error {
+	applog.Infof("DRYRUN Sending %q file to %s", file, config.S3bucket)
 	return nil
 }
 
 // Main loop
-func upload(ctx context.Context, config appConfig, comm *chan message) {
+func upload(ctx context.Context, config cfg.AppConfig, comm *chan cfg.Message) {
 	applog.Info("Main upload loop started")
 
-	tick := time.Tick(time.Duration(1 * time.Second))
+	//tick := time.Tick(time.Duration(1 * time.Second))
 
 	// Keep uploading until we receive exit signal
 	for {
@@ -195,19 +156,19 @@ func upload(ctx context.Context, config appConfig, comm *chan message) {
 			applog.Info("Upload function exiting")
 			close(*comm)
 			return
-		// Fsnotify event will go here
-		case <-tick:
-			if len(*comm) < workersCannelSize {
-				*comm <- message{file: fmt.Sprintf("file-%v", rand.Int())}
-			} else {
-				config.metrics.ChannelFullEvents.WithLabelValues().Inc()
-			}
+			// Fsnotify event will go here
+			// case <-tick:
+			// 	if len(*comm) < workersCannelSize {
+			// 		*comm <- cfg.Message{File: fmt.Sprintf("file-%v", rand.Int())}
+			// 	} else {
+			// 		config.Metrics.ChannelFullEvents.WithLabelValues().Inc()
+			// 	}
 		}
 	}
 }
 
 // Metrics updater
-func updateMetrics(config appConfig, comm *chan message) {
+func updateMetrics(config cfg.AppConfig, comm *chan cfg.Message) {
 	// Updating every 2 seconds is frequent enough
 	tick := time.Tick(2 * time.Second)
 
@@ -215,13 +176,13 @@ func updateMetrics(config appConfig, comm *chan message) {
 		select {
 		// Tick handler
 		case <-tick:
-			config.metrics.ChannelLength.WithLabelValues().Set(float64(len(*comm)))
+			config.Metrics.ChannelLength.WithLabelValues().Set(float64(len(*comm)))
 		}
 	}
 }
 
 // Worker
-func worker(ctx context.Context, id int, config appConfig, comm chan message, status *workerStatus, wg *sync.WaitGroup) {
+func worker(ctx context.Context, id int, config cfg.AppConfig, comm chan cfg.Message, status *cfg.WorkerStatus, wg *sync.WaitGroup) {
 
 	applog.Infof("Worker %d started", id)
 	defer wg.Done()
@@ -254,25 +215,25 @@ func worker(ctx context.Context, id int, config appConfig, comm chan message, st
 
 		case msg := <-comm:
 
-			applog.Infof("Worker %d: processing file %q", id, msg.file)
+			applog.Infof("Worker %d: processing file %q", id, msg.File)
 
-			err := sendFile(config, client, "file")
-			config.metrics.FileSendCount.WithLabelValues().Inc()
+			err := sendFile(config, client, msg.File)
+			config.Metrics.FileSendCount.WithLabelValues().Inc()
 
 			if err != nil {
-				config.metrics.FileSendErrors.WithLabelValues().Inc()
+				config.Metrics.FileSendErrors.WithLabelValues().Inc()
 			} else {
-				config.metrics.FileSendSuccess.WithLabelValues().Inc()
+				config.Metrics.FileSendSuccess.WithLabelValues().Inc()
 			}
 		}
 	}
 }
 
 // Functions for pushing metrics
-func prometheusMetricsPusher(config appConfig) {
-	tick := time.Tick(config.pushInterval)
+func prometheusMetricsPusher(config cfg.AppConfig) {
+	tick := time.Tick(config.PushInterval)
 
-	pusher := push.New(config.pushGateway, "app").Gatherer(config.metrics.Registry)
+	pusher := push.New(config.PushGateway, "app").Gatherer(config.Metrics.Registry)
 
 	for {
 		select {
@@ -315,7 +276,8 @@ func main() {
 	var showVersion bool
 
 	// Init config
-	config := appConfig{}
+	config := cfg.AppConfig{}
+	config.WorkersCannelSize = workersCannelSize
 
 	//Make a background context.
 	ctx := context.Background()
@@ -324,15 +286,16 @@ func main() {
 
 	// Arguments
 	flag.BoolVar(&showVersion, "version", false, "Show version and exit")
-	flag.IntVar(&config.workers, "workers", 1, "The number of worker threads")
+	flag.IntVar(&config.Workers, "workers", 1, "The number of worker threads")
 	flag.StringVar(&listen, "listen", ":8765", "Address:port to listen on for exposing metrics")
-	flag.BoolVar(&config.verbose, "verbose", false, "Print INFO level applog to stdout")
+	flag.BoolVar(&config.Verbose, "verbose", false, "Print INFO level applog to stdout")
+	flag.StringVar(&config.PathToWatch, "path-to-watch", "", "FS path to watch for events")
 
-	flag.StringVar(&config.s3bucket, "s3-bucket", "", "S3 bucket to upload to")
-	flag.DurationVar(&config.sendTimeout, "send-timeout", time.Second*10, "Send request timeout")
+	flag.StringVar(&config.S3bucket, "s3-bucket", "", "S3 bucket to upload to")
+	flag.DurationVar(&config.SendTimeout, "send-timeout", time.Second*10, "Send request timeout")
 
-	flag.StringVar(&config.pushGateway, "push-gateway", "", "Prometheus Pushgateway URL")
-	flag.DurationVar(&config.pushInterval, "push-interval", time.Second*15, "Metrics push interval")
+	flag.StringVar(&config.PushGateway, "push-gateway", "", "Prometheus Pushgateway URL")
+	flag.DurationVar(&config.PushInterval, "push-interval", time.Second*15, "Metrics push interval")
 
 	flag.Parse()
 
@@ -343,34 +306,39 @@ func main() {
 	}
 
 	// Initialize the global status var
-	workerStatuses = make([]workerStatus, config.workers)
+	workerStatuses = make([]cfg.WorkerStatus, config.Workers)
 
 	// Logger
-	applog = logger.Init("s3-file-uploader", config.verbose, false, io.Discard)
+	applog = logger.Init("s3-file-uploader", config.Verbose, false, io.Discard)
+	config.Applog = applog
 
 	// Some checks
-	if config.s3bucket == "" {
+	if config.S3bucket == "" {
 		applog.Fatal("-s3-bucket is not specified")
-	} else if err := validateUrl(config.s3bucket); err != nil {
+	} else if err := validateUrl(config.S3bucket); err != nil {
 		applog.Fatal(err.Error())
 	}
 
+	if config.PathToWatch == "" {
+		applog.Fatal("-path-to-watch is not specified")
+	}
+
 	// Push interval sanity check
-	if config.pushInterval < 10*time.Second {
+	if config.PushInterval < 10*time.Second {
 		applog.Fatal("-push-interval must be >= 10 seconds")
 	}
 
 	applog.Info("Starting program")
 
 	// Init metric
-	config.metrics = metrics.InitMetrics(version, workersCannelSize, secondsDurationBuckets)
+	config.Metrics = metrics.InitMetrics(version, workersCannelSize, secondsDurationBuckets)
 
 	// Run a separate routine with http server
 	go runMainWebServer(config, listen)
 
 	// Make a channel and start workers
-	comm := make(chan message, workersCannelSize)
-	for i := 0; i < config.workers; i++ {
+	comm := make(chan cfg.Message, workersCannelSize)
+	for i := 0; i < config.Workers; i++ {
 		wg.Add(1)
 		go worker(ctxWithCancel, i, config, comm, &workerStatuses[i], &wg)
 	}
@@ -386,9 +354,10 @@ func main() {
 	// Upload stuff to the cloud!
 	started := time.Now()
 	go upload(ctxWithCancel, config, &comm)
+	go fs.WatchDirectory(ctx, &comm, config)
 
 	// Start metrics pusher if enabled
-	if config.pushGateway != "" {
+	if config.PushGateway != "" {
 		go prometheusMetricsPusher(config)
 	}
 
@@ -400,7 +369,7 @@ func main() {
 		exit <- true
 	}()
 
-	applog.Info("Upload is running.")
+	applog.Info("Upload started.")
 	<-exit
 	duration := time.Since(started).Seconds()
 

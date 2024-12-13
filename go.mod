@@ -4,6 +4,7 @@ go 1.22.10
 
 require (
 	github.com/dustin/go-humanize v1.0.1
+	github.com/fsnotify/fsnotify v1.8.0
 	github.com/google/logger v1.1.1
 	github.com/gorilla/mux v1.8.1
 	github.com/prometheus/client_golang v1.20.5
