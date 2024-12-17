@@ -138,7 +138,14 @@ func closeClient(config cfg.AppConfig, client cfg.SenderClient) error {
 
 // Send file to s3 bucket
 func sendFile(config cfg.AppConfig, client cfg.SenderClient, file string) error {
-	applog.Infof("DRYRUN Sending %q file to %s", file, config.S3bucket)
+	fi, err := os.Stat(file)
+	if err != nil {
+		return err
+	}
+
+	size := utils.HumanizeBytes(fi.Size(), false)
+
+	applog.Infof("DRYRUN Sending %q file (%s) to %s", file, size, config.S3bucket)
 	return nil
 }
 
@@ -156,13 +163,6 @@ func upload(ctx context.Context, config cfg.AppConfig, comm *chan cfg.Message) {
 			applog.Info("Upload function exiting")
 			close(*comm)
 			return
-			// Fsnotify event will go here
-			// case <-tick:
-			// 	if len(*comm) < workersCannelSize {
-			// 		*comm <- cfg.Message{File: fmt.Sprintf("file-%v", rand.Int())}
-			// 	} else {
-			// 		config.Metrics.ChannelFullEvents.WithLabelValues().Inc()
-			// 	}
 		}
 	}
 }
@@ -182,7 +182,7 @@ func updateMetrics(config cfg.AppConfig, comm *chan cfg.Message) {
 }
 
 // Worker
-func worker(ctx context.Context, id int, config cfg.AppConfig, comm chan cfg.Message, status *cfg.WorkerStatus, wg *sync.WaitGroup) {
+func worker(wg *sync.WaitGroup, ctx context.Context, id int, config cfg.AppConfig, comm chan cfg.Message, status *cfg.WorkerStatus) {
 
 	applog.Infof("Worker %d started", id)
 	defer wg.Done()
@@ -274,6 +274,7 @@ func main() {
 	var listen string
 	var wg sync.WaitGroup
 	var showVersion bool
+	var ctxWithCancel context.Context
 
 	// Init config
 	config := cfg.AppConfig{}
@@ -282,7 +283,7 @@ func main() {
 	//Make a background context.
 	ctx := context.Background()
 	// Make a new context with cancel, we'll use it to make sure all routines can exit properly.
-	ctxWithCancel, cancelFunction := context.WithCancel(ctx)
+	ctxWithCancel, config.CancelFunction = context.WithCancel(ctx)
 
 	// Arguments
 	flag.BoolVar(&showVersion, "version", false, "Show version and exit")
@@ -290,6 +291,7 @@ func main() {
 	flag.StringVar(&listen, "listen", ":8765", "Address:port to listen on for exposing metrics")
 	flag.BoolVar(&config.Verbose, "verbose", false, "Print INFO level applog to stdout")
 	flag.StringVar(&config.PathToWatch, "path-to-watch", "", "FS path to watch for events")
+	flag.StringVar(&config.ExitOnFilename, "exit-on-filename", "", "If this filename is detected by fsWatch, the program exits")
 
 	flag.StringVar(&config.S3bucket, "s3-bucket", "", "S3 bucket to upload to")
 	flag.DurationVar(&config.SendTimeout, "send-timeout", time.Second*10, "Send request timeout")
@@ -340,7 +342,7 @@ func main() {
 	comm := make(chan cfg.Message, workersCannelSize)
 	for i := 0; i < config.Workers; i++ {
 		wg.Add(1)
-		go worker(ctxWithCancel, i, config, comm, &workerStatuses[i], &wg)
+		go worker(&wg, ctxWithCancel, i, config, comm, &workerStatuses[i])
 	}
 
 	// Channels for signal processing and locking main()
@@ -354,19 +356,24 @@ func main() {
 	// Upload stuff to the cloud!
 	started := time.Now()
 	go upload(ctxWithCancel, config, &comm)
-	go fs.WatchDirectory(ctx, &comm, config)
+	go fs.WatchDirectory(ctxWithCancel, &comm, config)
 
 	// Start metrics pusher if enabled
 	if config.PushGateway != "" {
 		go prometheusMetricsPusher(config)
 	}
 
-	// Wait for signals to exit and send signal to "exit" channel
+	// Wait for signals to exit or for context to be cancaelled to and send signal to "exit" channel
 	go func() {
-		sig := <-sigs
-		fmt.Printf("\nReceived signal: %v\n", sig)
-		cancelFunction()
-		exit <- true
+		select {
+		case sig := <-sigs:
+			fmt.Printf("\nReceived signal: %v\n", sig)
+			config.CancelFunction()
+			exit <- true
+		case <-ctxWithCancel.Done():
+			applog.Info("Main function exiting")
+			exit <- true
+		}
 	}()
 
 	applog.Info("Upload started.")
@@ -375,5 +382,5 @@ func main() {
 
 	// Wait for workers to exit
 	wg.Wait()
-	applog.Infof("Benchmark is complete. Duration %s", utils.HumanizeDurationSeconds(duration))
+	applog.Infof("Complete. Duration %s", utils.HumanizeDurationSeconds(duration))
 }

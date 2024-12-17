@@ -2,6 +2,7 @@ package cfg
 
 import (
 	"bufio"
+	"context"
 	"net"
 	"net/http"
 	"time"
@@ -19,6 +20,9 @@ type AppConfig struct {
 	SendTimeout       time.Duration
 	S3bucket          string
 	PathToWatch       string
+
+	ExitOnFilename string
+	CancelFunction context.CancelFunc
 
 	PushGateway  string
 	PushInterval time.Duration

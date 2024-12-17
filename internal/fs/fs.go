@@ -11,11 +11,12 @@ import (
 // Check if fs event is the one we care about
 func isValidFsEvent(event fsnotify.Event) bool {
 
-	if event.Op&fsnotify.Write == fsnotify.Write {
+	// fsnotify does not support CLOSE_WRITE events, so we need to watch for CREATE.
+	// Which means something else needs to move files (mv SRC DST) to the directory we watch.
+	if event.Op&fsnotify.Create == fsnotify.Create {
 		return true
 	}
-
-	// if event.Op&fsnotify.Create == fsnotify.Create {
+	// if event.Op&fsnotify.Write == fsnotify.Write {
 	// 	return true
 	// }
 	// if event.Op&fsnotify.Remove == fsnotify.Remove {
@@ -30,14 +31,18 @@ func fsWatch(ctx context.Context, comm *chan cfg.Message, watcher *fsnotify.Watc
 		select {
 		case <-ctx.Done():
 			config.Applog.Info("fsWatch function exiting")
-			close(*comm)
 			return
 		case event, ok := <-watcher.Events:
 			if !ok {
 				return
 			}
 			if isValidFsEvent(event) {
-				config.Applog.Infof("modified file: %q (%v)", event.Name, event.Op)
+				config.Applog.Infof("Detected file: %q (%v)", event.Name, event.Op)
+				if config.ExitOnFilename != "" && event.Name == config.ExitOnFilename {
+					config.Applog.Infof("Exiting on file: %q", event.Name)
+					config.CancelFunction()
+					return
+				}
 				if len(*comm) < config.WorkersCannelSize {
 					*comm <- cfg.Message{File: event.Name}
 				} else {
