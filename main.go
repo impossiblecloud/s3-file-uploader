@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"github.com/adidenko/s3-file-uploader/internal/cfg"
 	"github.com/adidenko/s3-file-uploader/internal/fs"
 	"github.com/adidenko/s3-file-uploader/internal/metrics"
+	"github.com/adidenko/s3-file-uploader/internal/s3"
 	"github.com/adidenko/s3-file-uploader/internal/utils"
 
 	"github.com/google/logger"
@@ -144,9 +146,26 @@ func sendFile(config cfg.AppConfig, client cfg.SenderClient, file string) error 
 	}
 
 	size := utils.HumanizeBytes(fi.Size(), false)
+	applog.Infof("Sending %q file (%s) to %s", file, size, config.S3bucket)
 
-	applog.Infof("DRYRUN Sending %q file (%s) to %s", file, size, config.S3bucket)
-	return nil
+	err = fs.GzipFile(config, file)
+	if err != nil {
+		return err
+	}
+
+	err = fs.EncryptFile(config, file)
+	if err != nil {
+		return err
+	}
+
+	// TODO: add metrics and actually send file to s3
+	//return s3.UploadFile(config, file+".gz")
+	err = s3.FakeUploadFile(config, file)
+	if err != nil {
+		return err
+	}
+
+	return fs.DeleteFile(config, file)
 }
 
 // Main loop
@@ -215,6 +234,12 @@ func worker(wg *sync.WaitGroup, ctx context.Context, id int, config cfg.AppConfi
 
 		case msg := <-comm:
 
+			if config.ExitOnFilename != "" && msg.File == config.ExitOnFilename {
+				config.Applog.Infof("Worker %d: triggering exit on file: %q", id, msg.File)
+				config.CancelFunction()
+				return
+			}
+
 			applog.Infof("Worker %d: processing file %q", id, msg.File)
 
 			err := sendFile(config, client, msg.File)
@@ -222,6 +247,8 @@ func worker(wg *sync.WaitGroup, ctx context.Context, id int, config cfg.AppConfi
 
 			if err != nil {
 				config.Metrics.FileSendErrors.WithLabelValues().Inc()
+				// TODO: change to Fatalf
+				applog.Errorf("Got error while sending file: %s - upload is inconsistent, exiting", err.Error())
 			} else {
 				config.Metrics.FileSendSuccess.WithLabelValues().Inc()
 			}
@@ -290,11 +317,18 @@ func main() {
 	flag.IntVar(&config.Workers, "workers", 1, "The number of worker threads")
 	flag.StringVar(&listen, "listen", ":8765", "Address:port to listen on for exposing metrics")
 	flag.BoolVar(&config.Verbose, "verbose", false, "Print INFO level applog to stdout")
-	flag.StringVar(&config.PathToWatch, "path-to-watch", "", "FS path to watch for events")
+	flag.StringVar(&config.PathToWatch, "path-to-watch", "/app/tmp", "FS path to watch for events")
 	flag.StringVar(&config.ExitOnFilename, "exit-on-filename", "", "If this filename is detected by fsWatch, the program exits")
 
 	flag.StringVar(&config.S3bucket, "s3-bucket", "", "S3 bucket to upload to")
+	flag.StringVar(&config.S3path, "s3-path", "", "S3 path inside a bucket to upload to")
 	flag.DurationVar(&config.SendTimeout, "send-timeout", time.Second*10, "Send request timeout")
+
+	flag.BoolVar(&config.Encrypt, "gzip", true, "Wether to gzip a file before uploading")
+	flag.BoolVar(&config.Gzip, "encrypt", true, "Wether to encrypt a file before uploading")
+	flag.StringVar(&config.GzipDir, "gzip-dir", "/app/gzip", "Directory to store temporary gzipped files in")
+	flag.StringVar(&config.EncryptDir, "encrypt-dir", "/app/enc", "Directory to store temporary encrypted files in")
+	flag.StringVar(&config.EnvVarGPGPass, "env-var-name-gpg-password", "GPG_PASSWORD", "Env var name with GPG password")
 
 	flag.StringVar(&config.PushGateway, "push-gateway", "", "Prometheus Pushgateway URL")
 	flag.DurationVar(&config.PushInterval, "push-interval", time.Second*15, "Metrics push interval")
@@ -317,19 +351,28 @@ func main() {
 	// Some checks
 	if config.S3bucket == "" {
 		applog.Fatal("-s3-bucket is not specified")
-	} else if err := validateUrl(config.S3bucket); err != nil {
-		applog.Fatal(err.Error())
+	} else if config.S3path == "" {
+		applog.Fatal("-s3-path is not specified")
+	} else {
+		config.S3path = strings.TrimSuffix(config.S3path, "/")
 	}
 
 	if config.PathToWatch == "" {
 		applog.Fatal("-path-to-watch is not specified")
 	}
 
-	// Push interval sanity check
+	if config.Encrypt {
+		config.GpgPassword = os.Getenv(config.EnvVarGPGPass)
+		if config.GpgPassword == "" {
+			applog.Fatal("Empty or non existent GGP password env variable")
+		}
+	}
+
 	if config.PushInterval < 10*time.Second {
 		applog.Fatal("-push-interval must be >= 10 seconds")
 	}
 
+	// Checks complete, safe to start
 	applog.Info("Starting program")
 
 	// Init metric

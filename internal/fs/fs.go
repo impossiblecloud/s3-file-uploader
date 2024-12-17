@@ -2,6 +2,10 @@ package fs
 
 import (
 	"context"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 
 	"github.com/adidenko/s3-file-uploader/internal/cfg"
 
@@ -38,11 +42,6 @@ func fsWatch(ctx context.Context, comm *chan cfg.Message, watcher *fsnotify.Watc
 			}
 			if isValidFsEvent(event) {
 				config.Applog.Infof("Detected file: %q (%v)", event.Name, event.Op)
-				if config.ExitOnFilename != "" && event.Name == config.ExitOnFilename {
-					config.Applog.Infof("Exiting on file: %q", event.Name)
-					config.CancelFunction()
-					return
-				}
 				if len(*comm) < config.WorkersCannelSize {
 					*comm <- cfg.Message{File: event.Name}
 				} else {
@@ -80,4 +79,86 @@ func WatchDirectory(ctx context.Context, comm *chan cfg.Message, config cfg.AppC
 	config.Applog.Infof("Started fsnotify watcher for %q path", config.PathToWatch)
 	<-ctx.Done()
 	config.Applog.Info("WatchDirectory function exiting")
+}
+
+// EncryptFile encrypts a file with gpg tool
+func EncryptFile(config cfg.AppConfig, filename string) error {
+	if !config.Encrypt {
+		return nil
+	}
+
+	// Original command: gpg -c --verbose --batch --yes --passphrase $GPG_PASSWORD -o /data/enc/$f /data/sql/$f
+	file := filepath.Base(filename)
+	srcFile := filename
+	if config.Gzip {
+		srcFile = filepath.Join(config.GzipDir, file+".gz")
+	}
+	encFile := filepath.Join(config.EncryptDir, file+".enc")
+
+	// Use external gpg tool to make sure we can decrypt easily using the same tool
+	cmd := exec.Command("gpg", "-c", "--batch", "--yes", "--passphrase", config.GpgPassword, "-o", encFile, srcFile)
+	if output, err := cmd.Output(); err != nil {
+		// "gpg -c" always returns exit code 2, so we need to work that around by checking size of encrypted file
+		if fi, err := os.Stat(encFile); err == nil {
+			if fi.Size() > 0 {
+				// Encrypted file is not empty, we can exit
+				return nil
+			}
+		}
+		return fmt.Errorf("error executing gpg CLI command: %s: %s", err.Error(), string(output))
+	}
+	return nil
+}
+
+// GzipFile gzips a file
+func GzipFile(config cfg.AppConfig, filename string) error {
+	if !config.Gzip {
+		return nil
+	}
+
+	file := filepath.Base(filename)
+
+	err := os.Rename(filename, filepath.Join(config.GzipDir, file))
+	if err != nil {
+		config.Applog.Error(err)
+		return err
+	}
+
+	// Use external gzip tool to make sure we can ungzip easily
+	cmd := exec.Command("gzip", filepath.Join(config.GzipDir, file))
+	if output, err := cmd.Output(); err != nil {
+		return fmt.Errorf("error executing gzip CLI command: %s: %s", err.Error(), string(output))
+	}
+	return nil
+}
+
+// DeleteFile deletes a file and all temporary ones (gzip and encrypted)
+func DeleteFile(config cfg.AppConfig, filename string) error {
+	file := filepath.Base(filename)
+	gzipFile := filepath.Join(config.GzipDir, file+".gz")
+	encFile := filepath.Join(config.EncryptDir, file+".enc")
+
+	if err := os.Remove(filename); err != nil {
+		// If we use gzip, then the source file is gone already, but let's try to delete anyway but without errors
+		if !config.Gzip {
+			config.Applog.Error(err)
+			return err
+		}
+	}
+
+	if config.Gzip {
+		if err := os.Remove(gzipFile); err != nil {
+			config.Applog.Error(err)
+			return err
+		}
+	}
+
+	if config.Encrypt {
+		if err := os.Remove(encFile); err != nil {
+			config.Applog.Error(err)
+			return err
+		}
+	}
+
+	return nil
 }

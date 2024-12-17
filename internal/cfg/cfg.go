@@ -19,7 +19,16 @@ type AppConfig struct {
 	Verbose           bool
 	SendTimeout       time.Duration
 	S3bucket          string
+	S3path            string
 	PathToWatch       string
+	EnvVarGPGPass     string
+	GpgPassword       string
+
+	Gzip    bool
+	Encrypt bool
+
+	GzipDir    string
+	EncryptDir string
 
 	ExitOnFilename string
 	CancelFunction context.CancelFunc
