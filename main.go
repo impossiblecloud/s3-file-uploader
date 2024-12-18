@@ -172,8 +172,6 @@ func sendFile(config cfg.AppConfig, client cfg.SenderClient, file string) error 
 func upload(ctx context.Context, config cfg.AppConfig, comm *chan cfg.Message) {
 	applog.Info("Main upload loop started")
 
-	//tick := time.Tick(time.Duration(1 * time.Second))
-
 	// Keep uploading until we receive exit signal
 	for {
 		select {
@@ -319,6 +317,7 @@ func main() {
 	flag.BoolVar(&config.Verbose, "verbose", false, "Print INFO level applog to stdout")
 	flag.StringVar(&config.PathToWatch, "path-to-watch", "/app/tmp", "FS path to watch for events")
 	flag.StringVar(&config.ExitOnFilename, "exit-on-filename", "", "If this filename is detected by fsWatch, the program exits")
+	flag.DurationVar(&config.ScanInterval, "scan-interval", time.Second*10, "Directory scan interval")
 
 	flag.StringVar(&config.S3bucket, "s3-bucket", "", "S3 bucket to upload to")
 	flag.StringVar(&config.S3path, "s3-path", "", "S3 path inside a bucket to upload to")
@@ -399,7 +398,8 @@ func main() {
 	// Upload stuff to the cloud!
 	started := time.Now()
 	go upload(ctxWithCancel, config, &comm)
-	go fs.WatchDirectory(ctxWithCancel, &comm, config)
+	//go fs.WatchDirectory(ctxWithCancel, &comm, config)
+	go fs.ScanDirectory(ctxWithCancel, &comm, config)
 
 	// Start metrics pusher if enabled
 	if config.PushGateway != "" {
@@ -419,7 +419,7 @@ func main() {
 		}
 	}()
 
-	applog.Info("Upload started.")
+	applog.Info("Application is started and waiting for an exit condition.")
 	<-exit
 	duration := time.Since(started).Seconds()
 

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"time"
 
 	"github.com/adidenko/s3-file-uploader/internal/cfg"
 
@@ -55,6 +56,39 @@ func fsWatch(ctx context.Context, comm *chan cfg.Message, watcher *fsnotify.Watc
 			config.Applog.Error(err)
 		}
 	}
+}
+
+func fsScan(comm *chan cfg.Message, config cfg.AppConfig) {
+	entries, err := os.ReadDir(config.PathToWatch)
+	if err != nil {
+		config.Applog.Fatal(err)
+	}
+
+	for _, e := range entries {
+		//config.Applog.Infof("Found file %q", e.Name())
+		*comm <- cfg.Message{File: filepath.Join(config.PathToWatch, e.Name())}
+	}
+}
+
+// ScanDirectory periodically scans the directory and sends files to process into the channel for workers
+func ScanDirectory(ctx context.Context, comm *chan cfg.Message, config cfg.AppConfig) {
+	tick := time.NewTicker(config.ScanInterval)
+
+	config.Applog.Info("Directory scanner started")
+	// Keep fireing until we receive exit signal
+	for {
+		select {
+		// Exit signal
+		case <-ctx.Done():
+			config.Applog.Info("Directory scanner exiting")
+			return
+		// Tick event
+		case <-tick.C:
+			//config.Applog.Info("Tick event")
+			fsScan(comm, config)
+		}
+	}
+
 }
 
 // WatchDirectory uses fsnotify to watch directory for events

@@ -35,6 +35,7 @@ type AppConfig struct {
 
 	PushGateway  string
 	PushInterval time.Duration
+	ScanInterval time.Duration
 
 	Metrics metrics.AppMetrics
 }
