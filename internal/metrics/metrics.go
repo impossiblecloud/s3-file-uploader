@@ -13,6 +13,7 @@ type AppMetrics struct {
 	// Counters
 	ChannelFullEvents *prometheus.CounterVec
 	FileSendCount     *prometheus.CounterVec
+	FileOrigBytesSum  *prometheus.CounterVec
 	FileSendBytesSum  *prometheus.CounterVec
 	FileSendErrors    *prometheus.CounterVec
 	FileSendSuccess   *prometheus.CounterVec
@@ -48,7 +49,7 @@ func InitMetrics(version string, workersCannelSize int, secondsDurationBuckets [
 			Namespace: "s3_file_uploader",
 			Subsystem: "uploads",
 			Name:      "total",
-			Help:      "The total number of requests sent to remote endpoint",
+			Help:      "The total number of objects sent to s3 endpoint",
 		},
 		[]string{},
 	)
@@ -58,7 +59,17 @@ func InitMetrics(version string, workersCannelSize int, secondsDurationBuckets [
 			Namespace: "s3_file_uploader",
 			Subsystem: "uploads",
 			Name:      "bytes_sum",
-			Help:      "The total number of bytes received from remote endpoint",
+			Help:      "The total number of bytes sent to s3 endpoint",
+		},
+		[]string{},
+	)
+
+	am.FileOrigBytesSum = promauto.With(am.Registry).NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "s3_file_uploader",
+			Subsystem: "files",
+			Name:      "bytes_sum",
+			Help:      "The total number of bytes of processed files before packing and encryption",
 		},
 		[]string{},
 	)

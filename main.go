@@ -145,6 +145,8 @@ func closeClient(config cfg.AppConfig, client cfg.SenderClient) error {
 
 // Send file to s3 bucket
 func sendFileS3(config cfg.AppConfig, client *s3.Client, file string) error {
+	var uploadedBytes int64
+
 	fi, err := os.Stat(file)
 	if err != nil {
 		return err
@@ -164,18 +166,20 @@ func sendFileS3(config cfg.AppConfig, client *s3.Client, file string) error {
 	}
 
 	if config.DryRun {
-		err = s3.FakeUploadFile(config, file)
+		uploadedBytes, err = s3.FakeUploadFile(config, file)
 		// For tests with unpack/decrypt
 		// err = s3.CopyFile(config, file)
 	} else {
-		err = client.UploadFile(config, file)
+		uploadedBytes, err = client.UploadFile(config, file)
 	}
 
 	if err != nil {
 		return err
 	}
 
-	// Clean up files only if it was sent successfully
+	// If we're here, upload was successful
+	config.Metrics.FileOrigBytesSum.WithLabelValues().Add(float64(fi.Size()))
+	config.Metrics.FileSendBytesSum.WithLabelValues().Add(float64(uploadedBytes))
 	return fs.DeleteFile(config, file)
 }
 

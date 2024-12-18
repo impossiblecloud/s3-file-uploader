@@ -65,41 +65,40 @@ func copy(src, dst string) (int64, error) {
 }
 
 // FakeUploadFile is used for testing
-func FakeUploadFile(config cfg.AppConfig, filename string) error {
+func FakeUploadFile(config cfg.AppConfig, filename string) (int64, error) {
 	realFile := getRealSourceFileName(config, filename)
 
 	fi, err := os.Stat(realFile)
 	if err != nil {
 		config.Applog.Error(err)
-		return err
+		return 0, err
 	}
 
 	config.Applog.Infof("FAKE UPLOAD TO S3: %q file, size %s", realFile, utils.HumanizeBytes(fi.Size(), false))
-
-	return nil
+	return fi.Size(), nil
 }
 
 // CopyFile is used for testing, it copies to /var/tmp
-func CopyFile(config cfg.AppConfig, filename string) error {
+func CopyFile(config cfg.AppConfig, filename string) (int64, error) {
 	realFile := getRealSourceFileName(config, filename)
 
 	fi, err := os.Stat(realFile)
 	if err != nil {
 		config.Applog.Error(err)
-		return err
+		return 0, err
 	}
 
 	dstFile := filepath.Join("/var/tmp", filepath.Base(realFile))
 	_, err = copy(realFile, dstFile)
 	if err != nil {
 		config.Applog.Error(err)
-		return err
+		return 0, err
 	}
 
 	config.Applog.Infof("COPYING FILE: %q file, size %s, destination %q)",
 		realFile, utils.HumanizeBytes(fi.Size(), false), dstFile)
 
-	return nil
+	return fi.Size(), nil
 }
 
 // NewClient initializes a new s3 client
@@ -125,12 +124,18 @@ func (client *Client) Close() {
 }
 
 // UploadFile uploads a file to s3
-func (client *Client) UploadFile(config cfg.AppConfig, filename string) error {
+func (client *Client) UploadFile(config cfg.AppConfig, filename string) (int64, error) {
 	realFile := getRealSourceFileName(config, filename)
+
+	fi, err := os.Stat(realFile)
+	if err != nil {
+		config.Applog.Error(err)
+		return 0, err
+	}
 
 	f, err := os.Open(realFile)
 	if err != nil {
-		return fmt.Errorf("failed to open file %q, %v", realFile, err)
+		return 0, fmt.Errorf("failed to open file %q, %v", realFile, err)
 	}
 	defer f.Close()
 
@@ -142,8 +147,8 @@ func (client *Client) UploadFile(config cfg.AppConfig, filename string) error {
 		Body:   f,
 	})
 	if err != nil {
-		return fmt.Errorf("failed to upload file, %v", err)
+		return 0, fmt.Errorf("failed to upload file, %v", err)
 	}
 	config.Applog.Infof("File uploaded to: %s\n", aws.StringValue(&result.Location))
-	return nil
+	return fi.Size(), nil
 }
