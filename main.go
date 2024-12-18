@@ -119,7 +119,7 @@ func runMainWebServer(config cfg.AppConfig, listen string) {
 }
 
 // Init client
-func initClient(config cfg.AppConfig) (cfg.SenderClient, error) {
+func initHTTPClient(config cfg.AppConfig) (cfg.SenderClient, error) {
 	var err error
 	client := cfg.SenderClient{}
 
@@ -131,6 +131,11 @@ func initClient(config cfg.AppConfig) (cfg.SenderClient, error) {
 	return client, err
 }
 
+// Init client
+func initS3Client(config cfg.AppConfig) (*s3.Client, error) {
+	return s3.NewClient(config)
+}
+
 // Close client
 func closeClient(config cfg.AppConfig, client cfg.SenderClient) error {
 	var err error
@@ -139,7 +144,7 @@ func closeClient(config cfg.AppConfig, client cfg.SenderClient) error {
 }
 
 // Send file to s3 bucket
-func sendFile(config cfg.AppConfig, client cfg.SenderClient, file string) error {
+func sendFileS3(config cfg.AppConfig, client *s3.Client, file string) error {
 	fi, err := os.Stat(file)
 	if err != nil {
 		return err
@@ -158,13 +163,19 @@ func sendFile(config cfg.AppConfig, client cfg.SenderClient, file string) error 
 		return err
 	}
 
-	// TODO: add metrics and actually send file to s3
-	//return s3.UploadFile(config, file+".gz")
-	err = s3.FakeUploadFile(config, file)
+	if config.DryRun {
+		err = s3.FakeUploadFile(config, file)
+		// For tests with unpack/decrypt
+		// err = s3.CopyFile(config, file)
+	} else {
+		err = client.UploadFile(config, file)
+	}
+
 	if err != nil {
 		return err
 	}
 
+	// Clean up files only if it was sent successfully
 	return fs.DeleteFile(config, file)
 }
 
@@ -207,7 +218,7 @@ func worker(wg *sync.WaitGroup, ctx context.Context, id int, config cfg.AppConfi
 	status.Running = true
 
 	// Init client per worker to use keep alive where possible
-	client, err := initClient(config)
+	client, err := initS3Client(config)
 	if err != nil {
 		status.Running = false
 		applog.Errorf("Worker %v: Failed to initialize sender client: %s", id, err.Error())
@@ -221,12 +232,7 @@ func worker(wg *sync.WaitGroup, ctx context.Context, id int, config cfg.AppConfi
 
 		case <-ctx.Done():
 			status.Running = false
-
-			err = closeClient(config, client)
-			if err != nil {
-				applog.Errorf("Worker %v: Error closing sender client: %s", id, err.Error())
-			}
-
+			client.Close()
 			applog.Infof("Worker %d exiting", id)
 			return
 
@@ -240,13 +246,13 @@ func worker(wg *sync.WaitGroup, ctx context.Context, id int, config cfg.AppConfi
 
 			applog.Infof("Worker %d: processing file %q", id, msg.File)
 
-			err := sendFile(config, client, msg.File)
+			err := sendFileS3(config, client, msg.File)
 			config.Metrics.FileSendCount.WithLabelValues().Inc()
 
 			if err != nil {
 				config.Metrics.FileSendErrors.WithLabelValues().Inc()
 				// TODO: change to Fatalf
-				applog.Errorf("Got error while sending file: %s - upload is inconsistent, exiting", err.Error())
+				applog.Errorf("Got error while sending file: %s - it will be retried later", err.Error())
 			} else {
 				config.Metrics.FileSendSuccess.WithLabelValues().Inc()
 			}
@@ -315,6 +321,7 @@ func main() {
 	flag.IntVar(&config.Workers, "workers", 1, "The number of worker threads")
 	flag.StringVar(&listen, "listen", ":8765", "Address:port to listen on for exposing metrics")
 	flag.BoolVar(&config.Verbose, "verbose", false, "Print INFO level applog to stdout")
+	flag.BoolVar(&config.DryRun, "dry-run", false, "Wether to run in a dry-run mode")
 	flag.StringVar(&config.PathToWatch, "path-to-watch", "/app/tmp", "FS path to watch for events")
 	flag.StringVar(&config.ExitOnFilename, "exit-on-filename", "", "If this filename is detected by fsWatch, the program exits")
 	flag.DurationVar(&config.ScanInterval, "scan-interval", time.Second*10, "Directory scan interval")

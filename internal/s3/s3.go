@@ -16,10 +16,16 @@ import (
 
 // Docs: https://docs.aws.amazon.com/sdk-for-go/api/service/s3/
 
+// Client stores pointers to configured remote endpoint writes/clients
+type Client struct {
+	Session  *session.Session
+	Uploader *s3manager.Uploader
+}
+
 func getRealSourceFileName(config cfg.AppConfig, filename string) string {
 	file := filepath.Base(filename)
-	gzipFile := filepath.Join(config.GzipDir, file+".gz")
-	encFile := filepath.Join(config.EncryptDir, file+".enc")
+	gzipFile := filepath.Join(config.GzipDir, file+".tgz")
+	encFile := filepath.Join(config.EncryptDir, file+".tgz")
 	realFile := filename
 
 	if config.Gzip {
@@ -96,15 +102,31 @@ func CopyFile(config cfg.AppConfig, filename string) error {
 	return nil
 }
 
-// UploadFile uploads a file to s3
-func UploadFile(config cfg.AppConfig, filename string) error {
-	realFile := getRealSourceFileName(config, filename)
+// NewClient initializes a new s3 client
+func NewClient(config cfg.AppConfig) (*Client, error) {
 
 	// The session the S3 Uploader will use
-	sess := session.Must(session.NewSession())
+	session := session.Must(session.NewSession())
 
 	// Create an uploader with the session and default options
-	uploader := s3manager.NewUploader(sess)
+	uploader := s3manager.NewUploader(session)
+
+	client := Client{
+		Session:  session,
+		Uploader: uploader,
+	}
+
+	return &client, nil
+}
+
+// Close closes s3 client
+func (client *Client) Close() {
+	// Nothing to do here yet
+}
+
+// UploadFile uploads a file to s3
+func (client *Client) UploadFile(config cfg.AppConfig, filename string) error {
+	realFile := getRealSourceFileName(config, filename)
 
 	f, err := os.Open(realFile)
 	if err != nil {
@@ -114,7 +136,7 @@ func UploadFile(config cfg.AppConfig, filename string) error {
 
 	// Upload the file to S3.
 	key := fmt.Sprintf("%s/%s", config.S3path, filepath.Base(realFile))
-	result, err := uploader.Upload(&s3manager.UploadInput{
+	result, err := client.Uploader.Upload(&s3manager.UploadInput{
 		Bucket: aws.String(config.S3bucket),
 		Key:    aws.String(key),
 		Body:   f,

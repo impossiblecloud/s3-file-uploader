@@ -26,6 +26,7 @@ type AppConfig struct {
 
 	Gzip    bool
 	Encrypt bool
+	DryRun  bool
 
 	GzipDir    string
 	EncryptDir string

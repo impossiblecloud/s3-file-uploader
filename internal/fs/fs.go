@@ -125,9 +125,9 @@ func EncryptFile(config cfg.AppConfig, filename string) error {
 	file := filepath.Base(filename)
 	srcFile := filename
 	if config.Gzip {
-		srcFile = filepath.Join(config.GzipDir, file+".gz")
+		srcFile = filepath.Join(config.GzipDir, file+".tgz")
 	}
-	encFile := filepath.Join(config.EncryptDir, file+".enc")
+	encFile := filepath.Join(config.EncryptDir, file+".tgz")
 
 	// Use external gpg tool to make sure we can decrypt easily using the same tool
 	cmd := exec.Command("gpg", "-c", "--batch", "--yes", "--passphrase", config.GpgPassword, "-o", encFile, srcFile)
@@ -151,15 +151,10 @@ func GzipFile(config cfg.AppConfig, filename string) error {
 	}
 
 	file := filepath.Base(filename)
+	gzipFile := filepath.Join(config.GzipDir, file+".tgz")
 
-	err := os.Rename(filename, filepath.Join(config.GzipDir, file))
-	if err != nil {
-		config.Applog.Error(err)
-		return err
-	}
-
-	// Use external gzip tool to make sure we can ungzip easily
-	cmd := exec.Command("gzip", filepath.Join(config.GzipDir, file))
+	// Use external tar+gzip tool to make sure we can unpack easily
+	cmd := exec.Command("tar", "czf", gzipFile, "-C", config.PathToWatch, file)
 	if output, err := cmd.Output(); err != nil {
 		return fmt.Errorf("error executing gzip CLI command: %s: %s", err.Error(), string(output))
 	}
@@ -169,12 +164,11 @@ func GzipFile(config cfg.AppConfig, filename string) error {
 // DeleteFile deletes a file and all temporary ones (gzip and encrypted)
 func DeleteFile(config cfg.AppConfig, filename string) error {
 	file := filepath.Base(filename)
-	gzipFile := filepath.Join(config.GzipDir, file+".gz")
-	encFile := filepath.Join(config.EncryptDir, file+".enc")
+	gzipFile := filepath.Join(config.GzipDir, file+".tgz")
+	encFile := filepath.Join(config.EncryptDir, file+".tgz")
 
 	if err := os.Remove(filename); err != nil {
-		// If we use gzip, then the source file is gone already, but let's try to delete anyway but without errors
-		if !config.Gzip {
+		if err := os.Remove(filename); err != nil {
 			config.Applog.Error(err)
 			return err
 		}
