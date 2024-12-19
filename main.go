@@ -10,10 +10,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"os/signal"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -250,13 +248,11 @@ func worker(wg *sync.WaitGroup, ctx context.Context, id int, config cfg.AppConfi
 
 			applog.Infof("Worker %d: processing file %q", id, msg.File)
 
-			err := sendFileS3(config, client, msg.File)
 			config.Metrics.FileSendCount.WithLabelValues().Inc()
-
+			err := sendFileS3(config, client, msg.File)
 			if err != nil {
 				config.Metrics.FileSendErrors.WithLabelValues().Inc()
-				// TODO: change to Fatalf
-				applog.Errorf("Got error while sending file: %s - it will be retried later", err.Error())
+				applog.Errorf("Failed to send file %q, it will be retried later. Error: %s", msg.File, err.Error())
 			} else {
 				config.Metrics.FileSendSuccess.WithLabelValues().Inc()
 			}
@@ -284,32 +280,13 @@ func prometheusMetricsPusher(config cfg.AppConfig) {
 	}
 }
 
-// Check URL
-func validateUrl(inURL string) error {
-
-	u, err := url.Parse(inURL)
-
-	if err != nil {
-		return err
-	}
-
-	if u.Scheme == "" {
-		return fmt.Errorf("can't find scheme in URL %q", inURL)
-	}
-
-	if u.Host == "" {
-		return fmt.Errorf("can't find host in URL %q", inURL)
-	}
-
-	return nil
-}
-
 // Main!
 func main() {
-	var listen string
+	var listen, s3uri string
 	var wg sync.WaitGroup
 	var showVersion bool
 	var ctxWithCancel context.Context
+	var err error
 
 	// Init config
 	config := cfg.AppConfig{}
@@ -330,8 +307,7 @@ func main() {
 	flag.StringVar(&config.ExitOnFilename, "exit-on-filename", "", "If this filename is detected by fsWatch, the program exits")
 	flag.DurationVar(&config.ScanInterval, "scan-interval", time.Second*10, "Directory scan interval")
 
-	flag.StringVar(&config.S3bucket, "s3-bucket", "", "S3 bucket to upload to")
-	flag.StringVar(&config.S3path, "s3-path", "", "S3 path inside a bucket to upload to")
+	flag.StringVar(&s3uri, "s3-uri", "", "S3 bucket to upload to")
 	flag.DurationVar(&config.SendTimeout, "send-timeout", time.Second*10, "Send request timeout")
 
 	flag.BoolVar(&config.Encrypt, "gzip", true, "Wether to gzip a file before uploading")
@@ -359,12 +335,18 @@ func main() {
 	config.Applog = applog
 
 	// Some checks
-	if config.S3bucket == "" {
-		applog.Fatal("-s3-bucket is not specified")
-	} else if config.S3path == "" {
-		applog.Fatal("-s3-path is not specified")
-	} else {
-		config.S3path = strings.TrimSuffix(config.S3path, "/")
+	if s3uri == "" {
+		applog.Fatal("-s3-uri is not specified")
+	} else if err := utils.ValidateUrl(s3uri); err != nil {
+		applog.Fatal(err.Error())
+	}
+
+	config.S3bucket, config.S3path, err = utils.ParseS3URL(s3uri)
+	if err != nil {
+		applog.Fatal(err.Error())
+	}
+	if config.S3bucket == "" || config.S3path == "" {
+		applog.Fatal("-s3-uri must contain bucket and path for backups")
 	}
 
 	if config.PathToWatch == "" {

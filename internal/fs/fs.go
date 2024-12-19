@@ -131,7 +131,7 @@ func EncryptFile(config cfg.AppConfig, filename string) error {
 
 	// Use external gpg tool to make sure we can decrypt easily using the same tool
 	cmd := exec.Command("gpg", "-c", "--batch", "--yes", "--passphrase", config.GpgPassword, "-o", encFile, srcFile)
-	if output, err := cmd.Output(); err != nil {
+	if output, err := cmd.CombinedOutput(); err != nil {
 		// "gpg -c" always returns exit code 2, so we need to work that around by checking size of encrypted file
 		if fi, err := os.Stat(encFile); err == nil {
 			if fi.Size() > 0 {
@@ -139,7 +139,7 @@ func EncryptFile(config cfg.AppConfig, filename string) error {
 				return nil
 			}
 		}
-		return fmt.Errorf("error executing gpg CLI command: %s: %s", err.Error(), string(output))
+		return fmt.Errorf("error executing gpg CLI command for %q: %s: %s", filename, err.Error(), string(output))
 	}
 	return nil
 }
@@ -155,8 +155,8 @@ func GzipFile(config cfg.AppConfig, filename string) error {
 
 	// Use external tar+gzip tool to make sure we can unpack easily
 	cmd := exec.Command("tar", "czf", gzipFile, "-C", config.PathToWatch, file)
-	if output, err := cmd.Output(); err != nil {
-		return fmt.Errorf("error executing gzip CLI command: %s: %s", err.Error(), string(output))
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("error executing tgz CLI command for %q: %s: %s", filename, err.Error(), string(output))
 	}
 	return nil
 }
