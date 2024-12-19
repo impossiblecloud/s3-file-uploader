@@ -6,8 +6,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/adidenko/s3-file-uploader/internal/cfg"
-	"github.com/adidenko/s3-file-uploader/internal/utils"
+	"github.com/impossiblecloud/s3-file-uploader/internal/cfg"
+	"github.com/impossiblecloud/s3-file-uploader/internal/utils"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"

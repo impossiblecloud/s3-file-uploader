@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/adidenko/s3-file-uploader/internal/metrics"
+	"github.com/impossiblecloud/s3-file-uploader/internal/metrics"
 	"github.com/google/logger"
 )
 

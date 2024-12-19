@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/adidenko/s3-file-uploader/internal/cfg"
+	"github.com/impossiblecloud/s3-file-uploader/internal/cfg"
 
 	"github.com/fsnotify/fsnotify"
 )

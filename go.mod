@@ -1,4 +1,4 @@
-module github.com/adidenko/s3-file-uploader
+module github.com/impossiblecloud/s3-file-uploader
 
 go 1.22.10
 

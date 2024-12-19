@@ -16,11 +16,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/adidenko/s3-file-uploader/internal/cfg"
-	"github.com/adidenko/s3-file-uploader/internal/fs"
-	"github.com/adidenko/s3-file-uploader/internal/metrics"
-	"github.com/adidenko/s3-file-uploader/internal/s3"
-	"github.com/adidenko/s3-file-uploader/internal/utils"
+	"github.com/impossiblecloud/s3-file-uploader/internal/cfg"
+	"github.com/impossiblecloud/s3-file-uploader/internal/fs"
+	"github.com/impossiblecloud/s3-file-uploader/internal/metrics"
+	"github.com/impossiblecloud/s3-file-uploader/internal/s3"
+	"github.com/impossiblecloud/s3-file-uploader/internal/utils"
 
 	"github.com/google/logger"
 	"github.com/gorilla/mux"
