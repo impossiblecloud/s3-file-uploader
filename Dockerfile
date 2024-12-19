@@ -24,5 +24,6 @@ RUN make build
 FROM alpine:3.21
 WORKDIR /
 COPY --from=build /build/output/s3-file-uploader /s3-file-uploader
-RUN apk add --no-cache inotify-tools
+RUN apk add --no-cache inotify-tools gpg && \
+    mkdir -p /app/enc /app/tmp /app/gzip
 ENTRYPOINT ["/s3-file-uploader"]

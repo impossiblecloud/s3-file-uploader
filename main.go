@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"os/signal"
 	"sync"
@@ -20,6 +19,7 @@ import (
 	"github.com/adidenko/s3-file-uploader/internal/cfg"
 	"github.com/adidenko/s3-file-uploader/internal/fs"
 	"github.com/adidenko/s3-file-uploader/internal/metrics"
+	"github.com/adidenko/s3-file-uploader/internal/s3"
 	"github.com/adidenko/s3-file-uploader/internal/utils"
 
 	"github.com/google/logger"
@@ -117,7 +117,7 @@ func runMainWebServer(config cfg.AppConfig, listen string) {
 }
 
 // Init client
-func initClient(config cfg.AppConfig) (cfg.SenderClient, error) {
+func initHTTPClient(config cfg.AppConfig) (cfg.SenderClient, error) {
 	var err error
 	client := cfg.SenderClient{}
 
@@ -129,6 +129,11 @@ func initClient(config cfg.AppConfig) (cfg.SenderClient, error) {
 	return client, err
 }
 
+// Init client
+func initS3Client(config cfg.AppConfig) (*s3.Client, error) {
+	return s3.NewClient(config)
+}
+
 // Close client
 func closeClient(config cfg.AppConfig, client cfg.SenderClient) error {
 	var err error
@@ -137,23 +142,48 @@ func closeClient(config cfg.AppConfig, client cfg.SenderClient) error {
 }
 
 // Send file to s3 bucket
-func sendFile(config cfg.AppConfig, client cfg.SenderClient, file string) error {
+func sendFileS3(config cfg.AppConfig, client *s3.Client, file string) error {
+	var uploadedBytes int64
+
 	fi, err := os.Stat(file)
 	if err != nil {
 		return err
 	}
 
 	size := utils.HumanizeBytes(fi.Size(), false)
+	applog.Infof("Sending %q file (%s) to %s", file, size, config.S3bucket)
 
-	applog.Infof("DRYRUN Sending %q file (%s) to %s", file, size, config.S3bucket)
-	return nil
+	err = fs.GzipFile(config, file)
+	if err != nil {
+		return err
+	}
+
+	err = fs.EncryptFile(config, file)
+	if err != nil {
+		return err
+	}
+
+	if config.DryRun {
+		uploadedBytes, err = s3.FakeUploadFile(config, file)
+		// For tests with unpack/decrypt
+		// err = s3.CopyFile(config, file)
+	} else {
+		uploadedBytes, err = client.UploadFile(config, file)
+	}
+
+	if err != nil {
+		return err
+	}
+
+	// If we're here, upload was successful
+	config.Metrics.FileOrigBytesSum.WithLabelValues().Add(float64(fi.Size()))
+	config.Metrics.FileSendBytesSum.WithLabelValues().Add(float64(uploadedBytes))
+	return fs.DeleteFile(config, file)
 }
 
 // Main loop
 func upload(ctx context.Context, config cfg.AppConfig, comm *chan cfg.Message) {
 	applog.Info("Main upload loop started")
-
-	//tick := time.Tick(time.Duration(1 * time.Second))
 
 	// Keep uploading until we receive exit signal
 	for {
@@ -190,7 +220,7 @@ func worker(wg *sync.WaitGroup, ctx context.Context, id int, config cfg.AppConfi
 	status.Running = true
 
 	// Init client per worker to use keep alive where possible
-	client, err := initClient(config)
+	client, err := initS3Client(config)
 	if err != nil {
 		status.Running = false
 		applog.Errorf("Worker %v: Failed to initialize sender client: %s", id, err.Error())
@@ -204,24 +234,25 @@ func worker(wg *sync.WaitGroup, ctx context.Context, id int, config cfg.AppConfi
 
 		case <-ctx.Done():
 			status.Running = false
-
-			err = closeClient(config, client)
-			if err != nil {
-				applog.Errorf("Worker %v: Error closing sender client: %s", id, err.Error())
-			}
-
+			client.Close()
 			applog.Infof("Worker %d exiting", id)
 			return
 
 		case msg := <-comm:
 
+			if config.ExitOnFilename != "" && msg.File == config.ExitOnFilename {
+				config.Applog.Infof("Worker %d: triggering exit on file: %q", id, msg.File)
+				config.CancelFunction()
+				return
+			}
+
 			applog.Infof("Worker %d: processing file %q", id, msg.File)
 
-			err := sendFile(config, client, msg.File)
 			config.Metrics.FileSendCount.WithLabelValues().Inc()
-
+			err := sendFileS3(config, client, msg.File)
 			if err != nil {
 				config.Metrics.FileSendErrors.WithLabelValues().Inc()
+				applog.Errorf("Failed to send file %q, it will be retried later. Error: %s", msg.File, err.Error())
 			} else {
 				config.Metrics.FileSendSuccess.WithLabelValues().Inc()
 			}
@@ -249,32 +280,13 @@ func prometheusMetricsPusher(config cfg.AppConfig) {
 	}
 }
 
-// Check URL
-func validateUrl(inURL string) error {
-
-	u, err := url.Parse(inURL)
-
-	if err != nil {
-		return err
-	}
-
-	if u.Scheme == "" {
-		return fmt.Errorf("can't find scheme in URL %q", inURL)
-	}
-
-	if u.Host == "" {
-		return fmt.Errorf("can't find host in URL %q", inURL)
-	}
-
-	return nil
-}
-
 // Main!
 func main() {
-	var listen string
+	var listen, s3uri string
 	var wg sync.WaitGroup
 	var showVersion bool
 	var ctxWithCancel context.Context
+	var err error
 
 	// Init config
 	config := cfg.AppConfig{}
@@ -290,11 +302,19 @@ func main() {
 	flag.IntVar(&config.Workers, "workers", 1, "The number of worker threads")
 	flag.StringVar(&listen, "listen", ":8765", "Address:port to listen on for exposing metrics")
 	flag.BoolVar(&config.Verbose, "verbose", false, "Print INFO level applog to stdout")
-	flag.StringVar(&config.PathToWatch, "path-to-watch", "", "FS path to watch for events")
+	flag.BoolVar(&config.DryRun, "dry-run", false, "Wether to run in a dry-run mode")
+	flag.StringVar(&config.PathToWatch, "path-to-watch", "/app/tmp", "FS path to watch for events")
 	flag.StringVar(&config.ExitOnFilename, "exit-on-filename", "", "If this filename is detected by fsWatch, the program exits")
+	flag.DurationVar(&config.ScanInterval, "scan-interval", time.Second*10, "Directory scan interval")
 
-	flag.StringVar(&config.S3bucket, "s3-bucket", "", "S3 bucket to upload to")
+	flag.StringVar(&s3uri, "s3-uri", "", "S3 bucket to upload to")
 	flag.DurationVar(&config.SendTimeout, "send-timeout", time.Second*10, "Send request timeout")
+
+	flag.BoolVar(&config.Encrypt, "gzip", true, "Wether to gzip a file before uploading")
+	flag.BoolVar(&config.Gzip, "encrypt", true, "Wether to encrypt a file before uploading")
+	flag.StringVar(&config.GzipDir, "gzip-dir", "/app/gzip", "Directory to store temporary gzipped files in")
+	flag.StringVar(&config.EncryptDir, "encrypt-dir", "/app/enc", "Directory to store temporary encrypted files in")
+	flag.StringVar(&config.EnvVarGPGPass, "env-var-name-gpg-password", "GPG_PASSWORD", "Env var name with GPG password")
 
 	flag.StringVar(&config.PushGateway, "push-gateway", "", "Prometheus Pushgateway URL")
 	flag.DurationVar(&config.PushInterval, "push-interval", time.Second*15, "Metrics push interval")
@@ -315,21 +335,36 @@ func main() {
 	config.Applog = applog
 
 	// Some checks
-	if config.S3bucket == "" {
-		applog.Fatal("-s3-bucket is not specified")
-	} else if err := validateUrl(config.S3bucket); err != nil {
+	if s3uri == "" {
+		applog.Fatal("-s3-uri is not specified")
+	} else if err := utils.ValidateUrl(s3uri); err != nil {
 		applog.Fatal(err.Error())
+	}
+
+	config.S3bucket, config.S3path, err = utils.ParseS3URL(s3uri)
+	if err != nil {
+		applog.Fatal(err.Error())
+	}
+	if config.S3bucket == "" || config.S3path == "" {
+		applog.Fatal("-s3-uri must contain bucket and path for backups")
 	}
 
 	if config.PathToWatch == "" {
 		applog.Fatal("-path-to-watch is not specified")
 	}
 
-	// Push interval sanity check
+	if config.Encrypt {
+		config.GpgPassword = os.Getenv(config.EnvVarGPGPass)
+		if config.GpgPassword == "" {
+			applog.Fatal("Empty or non existent GGP password env variable")
+		}
+	}
+
 	if config.PushInterval < 10*time.Second {
 		applog.Fatal("-push-interval must be >= 10 seconds")
 	}
 
+	// Checks complete, safe to start
 	applog.Info("Starting program")
 
 	// Init metric
@@ -356,7 +391,8 @@ func main() {
 	// Upload stuff to the cloud!
 	started := time.Now()
 	go upload(ctxWithCancel, config, &comm)
-	go fs.WatchDirectory(ctxWithCancel, &comm, config)
+	//go fs.WatchDirectory(ctxWithCancel, &comm, config)
+	go fs.ScanDirectory(ctxWithCancel, &comm, config)
 
 	// Start metrics pusher if enabled
 	if config.PushGateway != "" {
@@ -376,7 +412,7 @@ func main() {
 		}
 	}()
 
-	applog.Info("Upload started.")
+	applog.Info("Application is started and waiting for an exit condition.")
 	<-exit
 	duration := time.Since(started).Seconds()
 
