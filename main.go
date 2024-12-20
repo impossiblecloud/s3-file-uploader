@@ -247,6 +247,7 @@ func worker(wg *sync.WaitGroup, ctx context.Context, id int, config cfg.AppConfi
 			}
 
 			applog.Infof("Worker %d: processing file %q", id, msg.File)
+			fs.Lock(msg.File, id)
 
 			config.Metrics.FileSendCount.WithLabelValues().Inc()
 			err := sendFileS3(config, client, msg.File)
@@ -256,6 +257,7 @@ func worker(wg *sync.WaitGroup, ctx context.Context, id int, config cfg.AppConfi
 			} else {
 				config.Metrics.FileSendSuccess.WithLabelValues().Inc()
 			}
+			fs.UnLock(msg.File)
 		}
 	}
 }

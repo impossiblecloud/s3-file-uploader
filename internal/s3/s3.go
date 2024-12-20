@@ -3,8 +3,10 @@ package s3
 import (
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/impossiblecloud/s3-file-uploader/internal/cfg"
 	"github.com/impossiblecloud/s3-file-uploader/internal/utils"
@@ -73,6 +75,10 @@ func FakeUploadFile(config cfg.AppConfig, filename string) (int64, error) {
 		config.Applog.Error(err)
 		return 0, err
 	}
+
+	// Simulate random upload time by sleeping for a random duration
+	sleepSec := rand.IntN(10) + 5
+	time.Sleep(time.Duration(sleepSec) * time.Second)
 
 	config.Applog.Infof("FAKE UPLOAD TO S3: %q file, size %s", realFile, utils.HumanizeBytes(fi.Size(), false))
 	return fi.Size(), nil
