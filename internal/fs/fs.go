@@ -13,6 +13,8 @@ import (
 	"github.com/fsnotify/fsnotify"
 )
 
+const lockFilePrefix = "/tmp/s3-file-uploader.lock"
+
 // Check if fs event is the one we care about
 func isValidFsEvent(event fsnotify.Event) bool {
 
@@ -66,7 +68,12 @@ func fsScan(comm *chan cfg.Message, config cfg.AppConfig) {
 
 	for _, e := range entries {
 		//config.Applog.Infof("Found file %q", e.Name())
-		*comm <- cfg.Message{File: filepath.Join(config.PathToWatch, e.Name())}
+		filename := filepath.Join(config.PathToWatch, e.Name())
+		if IsLocked(filename) {
+			config.Applog.Infof("Found file %q but it's already being processed (lock detected)", filename)
+		} else {
+			*comm <- cfg.Message{File: filename}
+		}
 	}
 }
 
@@ -189,4 +196,40 @@ func DeleteFile(config cfg.AppConfig, filename string) error {
 	}
 
 	return nil
+}
+
+func getLockFileName(filename string) string {
+	file := filepath.Base(filename)
+	return fmt.Sprintf("%s.%s", lockFilePrefix, file)
+}
+
+// IsLocked checks if the file is locked
+func IsLocked(filename string) bool {
+	lockFile := getLockFileName(filename)
+	if _, err := os.Stat(lockFile); err != nil {
+		return false
+	}
+	return true
+}
+
+// Lock locks the file for exclusive access for processing
+func Lock(filename string, id int) error {
+	if IsLocked(filename) {
+		return fmt.Errorf("file %s is already locked", filename)
+	}
+
+	lockFile := getLockFileName(filename)
+	f, err := os.Create(lockFile)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	f.WriteString(fmt.Sprintf("%d", id))
+	return nil
+}
+
+// UnLock unlocks the file
+func UnLock(filename string) error {
+	lockFile := getLockFileName(filename)
+	return os.Remove(lockFile)
 }
